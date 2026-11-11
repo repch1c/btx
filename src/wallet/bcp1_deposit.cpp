@@ -769,11 +769,10 @@ std::vector<UniValue> DepositNotifyEventsForTx(const CWallet& wallet, const uint
             previous->status = DepositStatus::MEMPOOL;
         }
         std::vector<DepositEventType> events = EventsForDepositTransition(previous, now);
-        // A deposit spent before it confirmed reports SPENT, which GetDepositStatus
-        // decides before it looks at confirmations, so the step above never sees it
-        // confirm. Its own transaction confirming is still a confirmation.
-        if (!inserted_new && now.status == DepositStatus::SPENT && wtx->isConfirmed() &&
-            !(had_obs && obs.last_confirmations > 0)) {
+        // A spent output still confirms when its transaction first connects or
+        // reconnects after a disconnect. Its status stays SPENT in both cases.
+        if (!inserted_new && now.status == DepositStatus::SPENT && now.confirmations > 0 &&
+            (!had_obs || obs.last_confirmations == 0 || obs.saw_disconnect)) {
             events.insert(events.begin(), DepositEventType::TransactionConfirmed);
         }
         for (const DepositEventType type : events) {

@@ -146,10 +146,17 @@ class WalletBCP1DepositNotifyConfirmedTest(BitcoinTestFramework):
                          options={"inputs": [{"txid": received, "vout": vout}], "add_inputs": False, "include_unsafe": True})
         assert spend["complete"], spend
         self.sync_mempools()
-        self.generatetoaddress(funder_node, 1, miner.getnewaddress())
+        spent_block = self.generatetoaddress(funder_node, 1, miner.getnewaddress())[0]
         mined = self.events(received, lambda n: "transaction.confirmed" in n[len(pending):])[len(pending):]
         self.log.info(f"Events for the block: {mined}")
         assert "transaction.confirmed" in mined, f"no transaction.confirmed for a deposit spent before it confirmed: {mined}"
+
+        self.log.info("A spent deposit confirms again when its block reconnects")
+        venue_node.invalidateblock(spent_block)
+        before = len(self.events(received))
+        venue_node.reconsiderblock(spent_block)
+        again = self.events(received, lambda n: "transaction.confirmed" in n[before:])[before:]
+        assert_equal(again.count("transaction.confirmed"), 1)
 
 
 if __name__ == "__main__":
