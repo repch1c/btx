@@ -2438,10 +2438,26 @@ void EnsureSearchBound()
     }
 }
 
+// The caller holds g_search_mu. Policy writes and economy reads share the
+// same loaded snapshot, whichever reaches the helper first after startup.
+static void EnsureSearchIndexLoadedLocked(const fs::path& dir)
+{
+    static fs::path loaded_dir;
+    if (dir == loaded_dir) return;
+    g_search_idx.Clear();
+    std::string err;
+    (void)g_search_idx.Load(dir / "search-index.json", ConnNowMs(), err);
+    loaded_dir = dir;
+}
+
 void EnsureEconomy(ModelCatalog& cat)
 {
     EnsureSearchBound();
     const fs::path dir = HelperDir(cat);
+    {
+        std::lock_guard<std::mutex> lock(g_search_mu);
+        EnsureSearchIndexLoadedLocked(dir);
+    }
     if (g_feed_loaded && dir == g_econ_dir) return;
     g_chain_obs.clear();
     g_feed = FeedStore();
@@ -2449,11 +2465,6 @@ void EnsureEconomy(ModelCatalog& cat)
     g_feed_loaded = true;
     g_feed.SetPath(dir / "feed.json");
     std::string err;
-    {
-        std::lock_guard<std::mutex> lock(g_search_mu);
-        g_search_idx.Clear();
-        (void)g_search_idx.Load(dir / "search-index.json", ConnNowMs(), err);
-    }
     (void)g_feed.Load(ConnNowMs(), err);
     std::vector<ReleaseCampaign> local;
     const bool loaded_campaigns = LoadCampaigns(dir, local, err);
@@ -8140,33 +8151,45 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return true;
     }
     if (method == "hidesearchmodel" || method == "unhidesearchmodel") {
-        EnsureSearchBound();
-        const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
+        const fs::path dir = HelperDir(cat);
+        std::lock_guard<std::mutex> lock(g_search_mu);
+        EnsureSearchIndexLoadedLocked(dir);
+        const Digest48 id = ResolveUserIdLocked(Arg(0).get_str(), err);
         if (id.IsNull()) {
             err_code = "INVALID_PARAMETER";
             if (err.empty()) err = "model_id";
             return false;
         }
-        std::lock_guard<std::mutex> lock(g_search_mu);
-        g_search_idx.Hide(id, method == "hidesearchmodel");
-        std::string save_err;
-        (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
-        result.pushKV("hidden", method == "hidesearchmodel");
+        const bool hidden = method == "hidesearchmodel";
+        const bool previous = g_search_idx.Hidden(id);
+        g_search_idx.Hide(id, hidden);
+        if (!g_search_idx.Save(dir / "search-index.json", err)) {
+            g_search_idx.Hide(id, previous);
+            err_code = "IO_ERROR";
+            return false;
+        }
+        result.pushKV("hidden", hidden);
         return true;
     }
     if (method == "mutesearchpublisher" || method == "unmutesearchpublisher") {
-        EnsureSearchBound();
         const std::string publisher = ToLower(Arg(0).get_str());
         if (publisher.size() != 96 || !IsHex(publisher)) {
             err_code = "INVALID_PARAMETER";
             err = "publisher id";
             return false;
         }
+        const fs::path dir = HelperDir(cat);
         std::lock_guard<std::mutex> lock(g_search_mu);
-        g_search_idx.MutePublisher(publisher, method == "mutesearchpublisher");
-        std::string save_err;
-        (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
-        result.pushKV("muted", method == "mutesearchpublisher");
+        EnsureSearchIndexLoadedLocked(dir);
+        const bool muted = method == "mutesearchpublisher";
+        const bool previous = g_search_idx.Muted(publisher);
+        g_search_idx.MutePublisher(publisher, muted);
+        if (!g_search_idx.Save(dir / "search-index.json", err)) {
+            g_search_idx.MutePublisher(publisher, previous);
+            err_code = "IO_ERROR";
+            return false;
+        }
+        result.pushKV("muted", muted);
         return true;
     }
     if (method == "getmodelmanifest") {
@@ -12334,6 +12357,10 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     }
 
     ModelCatalog cat(cfg.modeldir, cfg.quota_bytes);
+    {
+        std::lock_guard<std::mutex> lock(g_search_mu);
+        EnsureSearchIndexLoadedLocked(HelperDir(cat));
+    }
     BindModelEventLayer(cfg.modeldir);
     EnsureCloudLoaded(cat);
     LoadRetrieveJobs(cat);
