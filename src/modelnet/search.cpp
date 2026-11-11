@@ -1320,7 +1320,12 @@ bool SearchIndex::Save(const fs::path& path, std::string& err) const
     snap.pushKV("muted_publishers", muted);
     snap.pushKV("sequence", static_cast<int64_t>(m_seq));
     snap.pushKV("records", arr);
-    fs::create_directories(path.parent_path());
+    try {
+        fs::create_directories(path.parent_path());
+    } catch (const fs::filesystem_error& e) {
+        err = e.what();
+        return false;
+    }
     // Write a temp file, check it after close and rename it over the index, so
     // a write that a full disk cuts short keeps the previous file.
     const fs::path tmp = fs::PathFromString(fs::PathToString(path) + ".tmp");
@@ -1348,8 +1353,8 @@ bool SearchIndex::Save(const fs::path& path, std::string& err) const
 
 bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
 {
-    if (!fs::exists(path)) return true;
     try {
+        if (!fs::exists(path)) return true;
         std::ifstream in(path);
         std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         UniValue o;
